@@ -1,0 +1,9 @@
+node_modules/
+.next/
+.env
+.env.local
+.env.production
+backend/bin/
+backend/obj/
+backend/App_Data/
+.DS_Store

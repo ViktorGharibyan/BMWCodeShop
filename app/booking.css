@@ -1,0 +1,455 @@
+.booking-page {
+  min-height: 100vh;
+  padding: 134px max(24px, calc((100vw - var(--container)) / 2)) 90px;
+  display: grid;
+  grid-template-columns: minmax(320px, 0.85fr) minmax(420px, 1fr);
+  gap: 80px;
+  align-items: start;
+  background: var(--black);
+  color: #fff;
+}
+
+.booking-intro {
+  padding-top: 18px;
+}
+
+.booking-kicker {
+  margin: 0;
+  color: #8f9aa5;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+}
+
+.booking-intro h1 {
+  margin: 18px 0 24px;
+  font-size: clamp(46px, 6vw, 86px);
+  font-weight: 800;
+  line-height: 0.98;
+  letter-spacing: -0.055em;
+}
+
+.booking-intro h1 span {
+  color: var(--blue);
+}
+
+.booking-intro > p:not(.booking-kicker) {
+  max-width: 500px;
+  margin: 0 0 26px;
+  color: #b8c1ca;
+  font-size: 16px;
+  line-height: 1.75;
+}
+
+.booking-intro > a {
+  color: #fff;
+  text-decoration: none;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.booking-intro > a:hover,
+.booking-intro > a:focus-visible {
+  color: var(--blue);
+  outline: none;
+}
+
+.booking-form {
+  padding: 32px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  background: #fff;
+  color: var(--ink);
+  border-radius: 16px;
+  box-shadow: 0 28px 70px rgba(0, 0, 0, 0.25);
+}
+
+.booking-form label {
+  display: grid;
+  gap: 7px;
+  color: #39424b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.booking-form input,
+.booking-form select,
+.booking-form textarea {
+  width: 100%;
+  appearance: none;
+  border: 1px solid #c7cdd4;
+  border-radius: 9px;
+  background: #fff;
+  color: #12171c;
+  padding: 12px 13px;
+  font-size: 14px;
+  line-height: 1.45;
+  outline: none;
+  transition: border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.booking-form input::placeholder,
+.booking-form textarea::placeholder {
+  color: #8a949e;
+}
+
+.booking-form input:focus,
+.booking-form select:focus,
+.booking-form textarea:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(11, 115, 255, 0.12);
+}
+
+.booking-form textarea {
+  resize: vertical;
+  min-height: 110px;
+}
+
+.booking-form .full {
+  grid-column: 1 / -1;
+}
+
+.booking-form .button {
+  min-height: 50px;
+  justify-content: center;
+  border: 0;
+  cursor: pointer;
+}
+
+.booking-form .button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.form-status {
+  align-self: center;
+  margin: 0;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.5;
+}
+
+.form-status.success {
+  color: #167447;
+}
+
+.form-status.error {
+  color: #a12525;
+}
+
+@media (max-width: 900px) {
+  .booking-page {
+    grid-template-columns: 1fr;
+    gap: 48px;
+    padding-top: 112px;
+  }
+
+  .booking-intro {
+    padding-top: 0;
+  }
+}
+
+@media (max-width: 560px) {
+  .booking-page {
+    padding-left: 18px;
+    padding-right: 18px;
+  }
+
+  .booking-form {
+    grid-template-columns: 1fr;
+    padding: 20px;
+  }
+
+  .booking-form .full {
+    grid-column: auto;
+  }
+}
+
+
+/* V10 booking date picker + success state */
+.booking-date-field {
+  position: relative;
+  display: grid;
+  gap: 7px;
+  color: #39424b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.booking-date-label b {
+  color: var(--blue);
+}
+
+.date-picker-trigger {
+  width: 100%;
+  min-height: 47px;
+  padding: 0 13px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  border: 1px solid #c7cdd4;
+  border-radius: 9px;
+  background: #fff;
+  color: #8a949e;
+  font-size: 14px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.date-picker-trigger.has-value {
+  color: #12171c;
+}
+
+.date-picker-trigger:hover,
+.date-picker-trigger:focus-visible {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(11, 115, 255, 0.12);
+  outline: none;
+}
+
+.date-picker-icon {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  border: 1.5px solid #65717c;
+  border-radius: 4px;
+}
+
+.date-picker-icon::before,
+.date-picker-icon::after {
+  content: '';
+  position: absolute;
+  top: -3px;
+  width: 2px;
+  height: 5px;
+  border-radius: 2px;
+  background: #65717c;
+}
+
+.date-picker-icon::before { left: 4px; }
+.date-picker-icon::after { right: 4px; }
+
+.date-picker {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 20;
+  width: min(340px, calc(100vw - 48px));
+  padding: 16px;
+  border: 1px solid #d7dde4;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 24px 60px rgba(14, 20, 27, 0.18);
+}
+
+.date-picker-head {
+  display: grid;
+  grid-template-columns: 36px 1fr 36px;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.date-picker-head strong {
+  color: #111820;
+  font-size: 14px;
+  font-weight: 800;
+  text-align: center;
+}
+
+.date-picker-head button {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid #e0e5ea;
+  border-radius: 8px;
+  background: #fff;
+  color: #17202a;
+  cursor: pointer;
+}
+
+.date-picker-head button:hover:not(:disabled),
+.date-picker-head button:focus-visible:not(:disabled) {
+  border-color: var(--blue);
+  color: var(--blue);
+  outline: none;
+}
+
+.date-picker-head button:disabled {
+  opacity: .28;
+  cursor: default;
+}
+
+.date-picker-weekdays,
+.date-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+}
+
+.date-picker-weekdays {
+  margin-bottom: 6px;
+}
+
+.date-picker-weekdays span {
+  color: #8b949e;
+  font-size: 10px;
+  font-weight: 800;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.date-picker-grid button,
+.date-picker-empty {
+  aspect-ratio: 1;
+}
+
+.date-picker-grid button {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #222b34;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.date-picker-grid button:hover:not(:disabled),
+.date-picker-grid button:focus-visible:not(:disabled) {
+  background: #eef5ff;
+  color: var(--blue);
+  outline: none;
+}
+
+.date-picker-grid button.is-today {
+  box-shadow: inset 0 0 0 1px rgba(11, 115, 255, .45);
+}
+
+.date-picker-grid button.is-selected {
+  background: var(--blue);
+  color: #fff;
+  box-shadow: none;
+}
+
+.date-picker-grid button:disabled {
+  color: #c7cdd3;
+  cursor: default;
+}
+
+.booking-success {
+  align-self: stretch;
+  min-height: 520px;
+  padding: 42px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 18px;
+  background: linear-gradient(160deg, rgba(20, 27, 35, .96), rgba(9, 13, 18, .98));
+  box-shadow: 0 30px 90px rgba(0,0,0,.34);
+}
+
+.booking-success-icon {
+  width: 54px;
+  height: 54px;
+  margin-bottom: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--blue);
+  color: #fff;
+  font-size: 24px;
+  font-weight: 900;
+}
+
+.booking-success-kicker {
+  margin: 0 0 10px;
+  color: #77aefd;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: .12em;
+}
+
+.booking-success h2 {
+  margin: 0 0 16px;
+  color: #fff;
+  font-size: clamp(34px, 4vw, 54px);
+  line-height: 1;
+  letter-spacing: -.045em;
+}
+
+.booking-success > p:not(.booking-success-kicker) {
+  max-width: 560px;
+  margin: 0 0 22px;
+  color: #b8c1ca;
+  font-size: 15px;
+  line-height: 1.75;
+}
+
+.booking-success-phone {
+  width: fit-content;
+  color: #fff;
+  text-decoration: none;
+  font-size: 21px;
+  font-weight: 800;
+}
+
+.booking-success-phone:hover,
+.booking-success-phone:focus-visible {
+  color: var(--blue);
+  outline: none;
+}
+
+.booking-success-actions {
+  margin-top: 30px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.booking-success-again {
+  min-height: 50px;
+  padding: 0 18px;
+  border: 1px solid rgba(255,255,255,.14);
+  border-radius: 8px;
+  background: transparent;
+  color: #d8dee5;
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.booking-success-again:hover,
+.booking-success-again:focus-visible {
+  border-color: rgba(255,255,255,.28);
+  color: #fff;
+  outline: none;
+}
+
+@media (max-width: 560px) {
+  .date-picker {
+    left: 50%;
+    transform: translateX(-50%);
+  }
+
+  .booking-success {
+    min-height: 440px;
+    padding: 26px;
+  }
+
+  .booking-success-actions {
+    display: grid;
+  }
+
+  .booking-success-actions .button,
+  .booking-success-again {
+    width: 100%;
+  }
+}
