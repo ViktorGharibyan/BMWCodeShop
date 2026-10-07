@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Buffers.Binary;
+using System.Data;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -43,36 +45,67 @@ builder.Services.AddCors(options =>
 var forwardedOptions = new ForwardedHeadersOptions
 {
     ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto,
-    ForwardLimit = 2,
+    // Railway supplies the client address separately from the X-Forwarded-For chain.
+    ForwardedForHeaderName = "X-Real-IP",
+    ForwardLimit = 1,
 };
 
-// Never trust forwarded IP headers from arbitrary internet clients.
-// Configure the CIDR(s) of the reverse proxy that is allowed to set X-Forwarded-For.
+var trustedProxyNetworks = new List<System.Net.IPNetwork>();
+forwardedOptions.KnownProxies.Clear();
+forwardedOptions.KnownIPNetworks.Clear();
+// Only explicitly configured proxy peers may supply the production client IP.
 foreach (var cidr in (builder.Configuration["TRUSTED_PROXY_CIDRS"] ?? string.Empty)
              .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
 {
-    if (TryParseCidr(cidr, out var network))
-        forwardedOptions.KnownIPNetworks.Add(network);
+    if (!TryParseCidr(cidr, out var network))
+        throw new InvalidOperationException("TRUSTED_PROXY_CIDRS contains an invalid CIDR.");
+    trustedProxyNetworks.Add(network);
+    forwardedOptions.KnownIPNetworks.Add(network);
 }
 
 var app = builder.Build();
+var requireTrustedProxy = !app.Environment.IsDevelopment();
 
+// Also apply CORS to proxy-verification failures, so the frontend can read 503.
+app.UseCors();
 app.Use(async (context, next) =>
 {
-    if (context.Request.Path == "/health")
+    var endpointPath = context.Request.Path.Value?.TrimEnd('/');
+    var protectsIpLimit = HttpMethods.IsPost(context.Request.Method) &&
+        (string.Equals(endpointPath, "/api/bookings", StringComparison.OrdinalIgnoreCase) ||
+         string.Equals(endpointPath, "/api/admin/login", StringComparison.OrdinalIgnoreCase));
+    if (requireTrustedProxy && protectsIpLimit)
     {
-        app.Logger.LogInformation(
-            "IP diagnostic: Remote={Remote}; X-Real-IP={Real}; X-Forwarded-For={Forwarded}",
-            context.Connection.RemoteIpAddress?.ToString(),
-            context.Request.Headers["X-Real-IP"].ToString(),
-            context.Request.Headers["X-Forwarded-For"].ToString());
+        var peer = NormalizeIp(context.Connection.RemoteIpAddress);
+        var header = context.Request.Headers["X-Real-IP"];
+        if (peer is null || !trustedProxyNetworks.Any(network => network.Contains(peer)))
+        {
+            app.Logger.LogWarning("IP limit refused request from untrusted proxy peer {Peer}.", peer);
+            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            context.Response.Headers.RetryAfter = "60";
+            await context.Response.WriteAsJsonAsync(new { message = "This request is temporarily unavailable. Please try again later." });
+            return;
+        }
+        if (header.Count != 1 || !IPAddress.TryParse(header[0], out var clientIp))
+        {
+            app.Logger.LogWarning("IP limit refused request: trusted proxy {Peer} supplied no valid single X-Real-IP.", peer);
+            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            context.Response.Headers.RetryAfter = "60";
+            await context.Response.WriteAsJsonAsync(new { message = "This request is temporarily unavailable. Please try again later." });
+            return;
+        }
+        // Request headers can be supplied by clients. This item is set only after
+        // validating the original socket peer, before forwarded headers change it.
+        context.Items["VerifiedClientIp"] = NormalizeIp(clientIp)!.ToString();
     }
 
     await next(context);
 });
 
-app.UseForwardedHeaders(forwardedOptions);
-app.UseCors();
+// Empty trust lists mean "trust everyone" to this middleware, so never enable it
+// without an explicit proxy entry. Development then uses the socket address.
+if (trustedProxyNetworks.Count > 0)
+    app.UseForwardedHeaders(forwardedOptions);
 
 var allowedServices = new HashSet<string>(new[]
 {
@@ -142,27 +175,26 @@ app.MapPost("/api/bookings", async (BookingRequest request, HttpContext context,
     if (validation.Count > 0)
         return Results.ValidationProblem(validation);
 
-    // At this point RemoteIpAddress has already been normalized by ForwardedHeaders,
-    // but only when the immediate proxy is in TRUSTED_PROXY_CIDRS.
-    var ipAddress = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+    var ipAddress = requireTrustedProxy
+        ? context.Items["VerifiedClientIp"] as string
+        : NormalizeIp(context.Connection.RemoteIpAddress)?.ToString();
+    if (ipAddress is null)
+        return Results.Problem("Client address could not be verified.", statusCode: StatusCodes.Status503ServiceUnavailable);
     var ipHash = HashIp(ipAddress, rateLimitSecret);
     var now = DateTimeOffset.UtcNow;
     var since = now.AddHours(-6);
 
     if (usePostgres)
     {
-        var recentRequests = await ReadRecentIpRequestsPostgresAsync(databaseConnectionString, ipHash, since);
-        if (recentRequests.Count >= 5)
+        var retryAfter = await TryInsertBookingPostgresAsync(
+            databaseConnectionString,
+            new BookingRecord(name!, phone!, vehicle!, service!, preferredDate, message, now, ipHash),
+            context.RequestAborted);
+        if (retryAfter is not null)
         {
-            var retryAt = recentRequests.Min().AddHours(6);
-            var retryAfter = Math.Max(60, (int)Math.Ceiling((retryAt - now).TotalSeconds));
-            context.Response.Headers.RetryAfter = retryAfter.ToString();
+            context.Response.Headers.RetryAfter = retryAfter.Value.ToString();
             return Results.Json(new { message = "Too many booking requests from this connection. Please try again later." }, statusCode: StatusCodes.Status429TooManyRequests);
         }
-
-        await InsertBookingPostgresAsync(
-            databaseConnectionString,
-            new BookingRecord(name!, phone!, vehicle!, service!, preferredDate, message, now, ipHash));
     }
     else
     {
@@ -173,10 +205,12 @@ app.MapPost("/api/bookings", async (BookingRequest request, HttpContext context,
         await fileLock.WaitAsync();
         try
         {
-            var recentRequests = await ReadRecentIpRequestsFileAsync(filePath, ipHash, since);
+            now = DateTimeOffset.UtcNow;
+            since = now.AddHours(-6);
+            var recentRequests = await ReadRecentIpRequestsFileAsync(filePath, ipHash, since, jsonOptions);
             if (recentRequests.Count >= 5)
             {
-                var retryAt = recentRequests.Min().AddHours(6);
+                var retryAt = recentRequests.OrderByDescending(time => time).Take(5).Min().AddHours(6);
                 var retryAfter = Math.Max(60, (int)Math.Ceiling((retryAt - now).TotalSeconds));
                 context.Response.Headers.RetryAfter = retryAfter.ToString();
                 return Results.Json(new { message = "Too many booking requests from this connection. Please try again later." }, statusCode: StatusCodes.Status429TooManyRequests);
@@ -199,7 +233,11 @@ app.MapPost("/api/admin/login", (AdminLoginRequest request, HttpContext context)
     if (string.IsNullOrWhiteSpace(adminUsername) || string.IsNullOrWhiteSpace(adminPassword) || string.IsNullOrWhiteSpace(tokenSecret))
         return Results.Problem("Admin access is not configured on the server.", statusCode: StatusCodes.Status503ServiceUnavailable);
 
-    var clientKey = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+    var clientKey = requireTrustedProxy
+        ? context.Items["VerifiedClientIp"] as string
+        : NormalizeIp(context.Connection.RemoteIpAddress)?.ToString();
+    if (clientKey is null)
+        return Results.Problem("Client address could not be verified.", statusCode: StatusCodes.Status503ServiceUnavailable);
     if (IsLoginRateLimited(clientKey))
         return Results.Json(new { message = "Too many sign-in attempts. Please wait and try again." }, statusCode: StatusCodes.Status429TooManyRequests);
 
@@ -305,11 +343,56 @@ static async Task EnsureDatabaseAsync(string connectionString)
     await command.ExecuteNonQueryAsync();
 }
 
-static async Task InsertBookingPostgresAsync(string connectionString, BookingRecord record)
+static async Task<int?> TryInsertBookingPostgresAsync(string connectionString, BookingRecord record, CancellationToken cancellationToken)
 {
     await using var connection = new NpgsqlConnection(connectionString);
-    await connection.OpenAsync();
+    await connection.OpenAsync(cancellationToken);
+    await using var transaction = await connection.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+
+    // All API instances using this database serialize check + insert for this IP.
+    // The transaction-scoped lock also works through transaction-mode poolers.
+    var lockKey = BinaryPrimitives.ReadInt64BigEndian(Convert.FromHexString(record.IpHash!));
+    await using (var lockCommand = connection.CreateCommand())
+    {
+        lockCommand.Transaction = transaction;
+        lockCommand.CommandText = "SELECT pg_advisory_xact_lock(@lockKey)";
+        lockCommand.Parameters.AddWithValue("lockKey", lockKey);
+        await lockCommand.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    DateTimeOffset now;
+    await using (var clockCommand = connection.CreateCommand())
+    {
+        clockCommand.Transaction = transaction;
+        clockCommand.CommandText = "SELECT clock_timestamp()";
+        now = new DateTimeOffset((DateTime)(await clockCommand.ExecuteScalarAsync(cancellationToken))!, TimeSpan.Zero);
+    }
+
+    var recentRequests = new List<DateTimeOffset>();
+    await using (var recentCommand = connection.CreateCommand())
+    {
+        recentCommand.Transaction = transaction;
+        recentCommand.CommandText = """
+            SELECT created_at FROM bookings
+            WHERE ip_hash = @ipHash AND created_at > @since
+            ORDER BY created_at DESC LIMIT 5
+            """;
+        recentCommand.Parameters.AddWithValue("ipHash", record.IpHash!);
+        recentCommand.Parameters.AddWithValue("since", now.AddHours(-6).UtcDateTime);
+        await using var reader = await recentCommand.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+            recentRequests.Add(new DateTimeOffset(reader.GetDateTime(0), TimeSpan.Zero));
+    }
+    if (recentRequests.Count >= 5)
+    {
+        var retryAt = recentRequests.Min().AddHours(6);
+        var retryAfter = Math.Max(60, (int)Math.Ceiling((retryAt - now).TotalSeconds));
+        await transaction.CommitAsync(cancellationToken);
+        return retryAfter;
+    }
+
     await using var command = connection.CreateCommand();
+    command.Transaction = transaction;
     command.CommandText = """
         INSERT INTO bookings (name, phone, vehicle, service, preferred_date, message, created_at, ip_hash)
         VALUES (@name, @phone, @vehicle, @service, @preferredDate, @message, @createdAt, @ipHash)
@@ -320,24 +403,11 @@ static async Task InsertBookingPostgresAsync(string connectionString, BookingRec
     command.Parameters.AddWithValue("service", record.Service);
     command.Parameters.AddWithValue("preferredDate", DateOnly.Parse(record.PreferredDate));
     command.Parameters.AddWithValue("message", record.Message ?? string.Empty);
-    command.Parameters.AddWithValue("createdAt", record.CreatedAt.UtcDateTime);
+    command.Parameters.AddWithValue("createdAt", now.UtcDateTime);
     command.Parameters.AddWithValue("ipHash", record.IpHash ?? string.Empty);
-    await command.ExecuteNonQueryAsync();
-}
-
-static async Task<List<DateTimeOffset>> ReadRecentIpRequestsPostgresAsync(string connectionString, string ipHash, DateTimeOffset since)
-{
-    var rows = new List<DateTimeOffset>();
-    await using var connection = new NpgsqlConnection(connectionString);
-    await connection.OpenAsync();
-    await using var command = connection.CreateCommand();
-    command.CommandText = "SELECT created_at FROM bookings WHERE ip_hash = @ipHash AND created_at >= @since ORDER BY created_at ASC";
-    command.Parameters.AddWithValue("ipHash", ipHash);
-    command.Parameters.AddWithValue("since", since.UtcDateTime);
-    await using var reader = await command.ExecuteReaderAsync();
-    while (await reader.ReadAsync())
-        rows.Add(new DateTimeOffset(reader.GetDateTime(0), TimeSpan.Zero));
-    return rows;
+    await command.ExecuteNonQueryAsync(cancellationToken);
+    await transaction.CommitAsync(cancellationToken);
+    return null;
 }
 
 static async Task<List<BookingAdminView>> ReadBookingsPostgresAsync(string connectionString)
@@ -367,7 +437,7 @@ static async Task<List<BookingAdminView>> ReadBookingsPostgresAsync(string conne
     return rows;
 }
 
-static async Task<List<DateTimeOffset>> ReadRecentIpRequestsFileAsync(string filePath, string ipHash, DateTimeOffset since)
+static async Task<List<DateTimeOffset>> ReadRecentIpRequestsFileAsync(string filePath, string ipHash, DateTimeOffset since, JsonSerializerOptions jsonOptions)
 {
     var result = new List<DateTimeOffset>();
     if (!File.Exists(filePath)) return result;
@@ -376,8 +446,8 @@ static async Task<List<DateTimeOffset>> ReadRecentIpRequestsFileAsync(string fil
     {
         try
         {
-            var record = JsonSerializer.Deserialize<BookingRecord>(line);
-            if (record?.CreatedAt >= since && record.IpHash == ipHash)
+            var record = JsonSerializer.Deserialize<BookingRecord>(line, jsonOptions);
+            if (record?.CreatedAt > since && record.IpHash == ipHash)
                 result.Add(record.CreatedAt);
         }
         catch (JsonException) { }
@@ -475,6 +545,9 @@ static bool TryParseCidr(string value, out System.Net.IPNetwork network)
 {
     return System.Net.IPNetwork.TryParse(value, out network);
 }
+
+static IPAddress? NormalizeIp(IPAddress? address) =>
+    address?.IsIPv4MappedToIPv6 == true ? address.MapToIPv4() : address;
 
 static string NormalizePostgresConnectionString(string value)
 {
