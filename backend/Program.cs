@@ -56,6 +56,21 @@ foreach (var cidr in (builder.Configuration["TRUSTED_PROXY_CIDRS"] ?? string.Emp
 }
 
 var app = builder.Build();
+
+app.Use(async (context, next) =>
+{
+    if (context.Request.Path == "/health")
+    {
+        app.Logger.LogInformation(
+            "IP diagnostic: Remote={Remote}; X-Real-IP={Real}; X-Forwarded-For={Forwarded}",
+            context.Connection.RemoteIpAddress?.ToString(),
+            context.Request.Headers["X-Real-IP"].ToString(),
+            context.Request.Headers["X-Forwarded-For"].ToString());
+    }
+
+    await next(context);
+});
+
 app.UseForwardedHeaders(forwardedOptions);
 app.UseCors();
 
