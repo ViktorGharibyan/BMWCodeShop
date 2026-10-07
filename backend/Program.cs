@@ -6,7 +6,6 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using Microsoft.AspNetCore.HttpOverrides;
 using Npgsql;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -42,27 +41,6 @@ builder.Services.AddCors(options =>
     });
 });
 
-var forwardedOptions = new ForwardedHeadersOptions
-{
-    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto,
-    // Railway supplies the client address separately from the X-Forwarded-For chain.
-    ForwardedForHeaderName = "X-Real-IP",
-    ForwardLimit = 1,
-};
-
-var trustedProxyNetworks = new List<System.Net.IPNetwork>();
-forwardedOptions.KnownProxies.Clear();
-forwardedOptions.KnownIPNetworks.Clear();
-// Only explicitly configured proxy peers may supply the production client IP.
-foreach (var cidr in (builder.Configuration["TRUSTED_PROXY_CIDRS"] ?? string.Empty)
-             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-{
-    if (!TryParseCidr(cidr, out var network))
-        throw new InvalidOperationException("TRUSTED_PROXY_CIDRS contains an invalid CIDR.");
-    trustedProxyNetworks.Add(network);
-    forwardedOptions.KnownIPNetworks.Add(network);
-}
-
 var app = builder.Build();
 var requireTrustedProxy = !app.Environment.IsDevelopment();
 
@@ -76,36 +54,20 @@ app.Use(async (context, next) =>
          string.Equals(endpointPath, "/api/admin/login", StringComparison.OrdinalIgnoreCase));
     if (requireTrustedProxy && protectsIpLimit)
     {
-        var peer = NormalizeIp(context.Connection.RemoteIpAddress);
         var header = context.Request.Headers["X-Real-IP"];
-        if (peer is null || !trustedProxyNetworks.Any(network => network.Contains(peer)))
+        if (header.Count != 1 || !IPAddress.TryParse(header[0], out var parsedClientIp))
         {
-            app.Logger.LogWarning("IP limit refused request from untrusted proxy peer {Peer}.", peer);
+            app.Logger.LogWarning("IP limit refused request: Railway did not supply one valid X-Real-IP header.");
             context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
             context.Response.Headers.RetryAfter = "60";
             await context.Response.WriteAsJsonAsync(new { message = "This request is temporarily unavailable. Please try again later." });
             return;
         }
-        if (header.Count != 1 || !IPAddress.TryParse(header[0], out var clientIp))
-        {
-            app.Logger.LogWarning("IP limit refused request: trusted proxy {Peer} supplied no valid single X-Real-IP.", peer);
-            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-            context.Response.Headers.RetryAfter = "60";
-            await context.Response.WriteAsJsonAsync(new { message = "This request is temporarily unavailable. Please try again later." });
-            return;
-        }
-        // Request headers can be supplied by clients. This item is set only after
-        // validating the original socket peer, before forwarded headers change it.
-        context.Items["VerifiedClientIp"] = NormalizeIp(clientIp)!.ToString();
+        context.Items["VerifiedClientIp"] = NormalizeIp(parsedClientIp)!.ToString();
     }
 
     await next(context);
 });
-
-// Empty trust lists mean "trust everyone" to this middleware, so never enable it
-// without an explicit proxy entry. Development then uses the socket address.
-if (trustedProxyNetworks.Count > 0)
-    app.UseForwardedHeaders(forwardedOptions);
 
 var allowedServices = new HashSet<string>(new[]
 {
@@ -540,11 +502,6 @@ bool IsLoginRateLimited(string key)
 }
 
 void ResetLoginAttempts(string key) => loginAttempts.TryRemove(key, out _);
-
-static bool TryParseCidr(string value, out System.Net.IPNetwork network)
-{
-    return System.Net.IPNetwork.TryParse(value, out network);
-}
 
 static IPAddress? NormalizeIp(IPAddress? address) =>
     address?.IsIPv4MappedToIPv6 == true ? address.MapToIPv4() : address;
